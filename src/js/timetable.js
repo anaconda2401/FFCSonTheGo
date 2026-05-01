@@ -787,6 +787,9 @@ window.initializeTimetable = () => {
     Function to add a course to the timetable
  */
 window.addCourseToTimetable = (courseData) => {
+    // If this course is hidden by the user, do not render it on the grid
+    if (courseData.isHidden) return;
+
     courseData.slots.forEach(function (slot) {
         var $divElement = $(
             `<div 

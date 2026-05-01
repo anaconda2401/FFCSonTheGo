@@ -69,14 +69,109 @@ $(() => {
     });
 
     /*
-        Double click event to add a course beck to the panel
+        Click event to toggle course visibility (Eye Icon)
+     */
+    $('#course-list').on('click', '.course-visibility-toggle', function () {
+        var $row = $(this).closest('tr');
+        var courseKey = $row.attr('data-course');
+        var courseId = Number(courseKey.split(/(\d+)/)[1]);
+
+        // Find the course object in state
+        var courseObj = null;
+        for (var i = 0; i < activeTable.data.length; ++i) {
+            if (activeTable.data[i].courseId === courseId) {
+                courseObj = activeTable.data[i];
+                break;
+            }
+        }
+        if (!courseObj) return;
+
+        // Toggle the isHidden flag
+        courseObj.isHidden = !courseObj.isHidden;
+
+        if (courseObj.isHidden) {
+            // Hide: fade the row, swap icon, remove from timetable, subtract credits
+            $row.css('opacity', '0.5').attr('data-hidden', 'true');
+            $(this).removeClass('fa-eye').addClass('fa-eye-slash');
+            removeCourseFromTimetable(courseKey);
+        } else {
+            // Show: restore row, swap icon, re-render on timetable, re-add credits
+            $row.css('opacity', '').attr('data-hidden', 'false');
+            $(this).removeClass('fa-eye-slash').addClass('fa-eye');
+            addCourseToTimetable(courseObj);
+        }
+
+        updateCredits();
+    });
+
+    /*
+        Change event for inline slot-swap dropdowns in the course list
+     */
+    $('#course-list').on('change', '.slot-swap-select', function () {
+        var newSlot = $(this).val();
+        var courseId = Number($(this).data('course-id'));
+        var courseKey = 'course' + courseId;
+
+        // Find the course in state
+        var courseObj = null;
+        for (var i = 0; i < activeTable.data.length; ++i) {
+            if (activeTable.data[i].courseId === courseId) {
+                courseObj = activeTable.data[i];
+                break;
+            }
+        }
+        if (!courseObj) return;
+
+        // Resolve the available slots array: typed arrays take priority over legacy flat array
+        var availPool =
+            courseObj.availableTheorySlots ||
+            courseObj.availableLabSlots ||
+            courseObj.availableSlots ||
+            [];
+
+        // Find the matching slot entry
+        var newEntry = null;
+        for (var j = 0; j < availPool.length; ++j) {
+            if (availPool[j].slot === newSlot) {
+                newEntry = availPool[j];
+                break;
+            }
+        }
+        if (!newEntry) return;
+
+        // Build new slots array (supports compound slots like A1+TA1 or L49+L50)
+        var newSlots = newSlot.split(/\s*\+\s*/).filter(Boolean);
+
+        // Update the state object
+        courseObj.slots = newSlots;
+        courseObj.faculty = newEntry.faculty;
+        courseObj.venue = newEntry.venue;
+
+        // Update Faculty and Venue cells in the table row
+        var $row = $(this).closest('tr');
+        $row.find('td').eq(getColumnIndex('Faculty')).text(newEntry.faculty);
+        $row.find('td').eq(getColumnIndex('Venue')).text(newEntry.venue);
+
+        // Re-render timetable for this course (skip if hidden)
+        if (!courseObj.isHidden) {
+            removeCourseFromTimetable(courseKey);
+            addCourseToTimetable(courseObj);
+        }
+    });
+
+    /*
+        Double click event to add a course back to the panel
      */
     $('#course-list').on('dblclick', 'tbody tr', function (e) {
-        var slotString = $(this)
+        var $slotCell = $(this)
             .find('td')
             .not('[colspan]')
-            .eq(getColumnIndex('Slot'))
-            .text();
+            .eq(getColumnIndex('Slot'));
+        // If the cell contains a swap dropdown, read the current value; otherwise use text
+        var $slotSelect = $slotCell.find('.slot-swap-select');
+        var slotString = $slotSelect.length
+            ? $slotSelect.val()
+            : $slotCell.text();
         var courseCode = $(this)
             .find('td')
             .eq(getColumnIndex('Course Code'))
@@ -121,7 +216,7 @@ function getColumnIndex(column) {
 }
 
 /*
-    Function to retrive items from a column in the course list
+    Function to retrieve items from a column in the course list
  */
 function retrieveColumnItems($column) {
     var index = getColumnIndex($column.text());
@@ -136,15 +231,29 @@ function retrieveColumnItems($column) {
 }
 
 /*
-    Function to update the total credits
+    Function to update the total credits.
+    - Skips rows where data-hidden="true" (visibility-toggled off).
+    - Deduplicates by Course Code so embedded theory+lab pairs
+      (same course code, two rows) are only counted once.
  */
 function updateCredits() {
     var totalCredits = 0;
+    var seenCodes = new Set();
+    var codeColIdx = getColumnIndex('Course Code');
+    var credColIdx = getColumnIndex('Credits');
 
     $('#course-list tbody tr').each(function () {
-        totalCredits += Number(
-            $(this).children('td').eq(getColumnIndex('Credits')).text(),
-        );
+        // Skip rows hidden by the visibility toggle
+        if ($(this).attr('data-hidden') === 'true') return;
+
+        var courseCode = $(this).children('td').eq(codeColIdx).text().trim();
+
+        // Skip if we've already counted credits for this course code
+        if (courseCode && seenCodes.has(courseCode)) return;
+
+        if (courseCode) seenCodes.add(courseCode);
+
+        totalCredits += Number($(this).children('td').eq(credColIdx).text());
     });
 
     $('#total-credits').text(totalCredits);
@@ -154,17 +263,49 @@ function updateCredits() {
     Function to insert a course into the course list
  */
 window.addCourseToCourseList = (courseData) => {
+    // ── Build Slot cell ──────────────────────────────────────────────────────
+    // Use typed available-slots arrays (new) or legacy flat array (old saves).
+    // Theory rows use availableTheorySlots; lab rows use availableLabSlots.
+    var availPool =
+        courseData.availableTheorySlots ||
+        courseData.availableLabSlots ||
+        courseData.availableSlots ||
+        [];
+    var slotCellHtml;
+
+    if (availPool.length > 0) {
+        var currentSlotKey = courseData.slots.join('+');
+        var optionsHtml = availPool
+            .map(function (s) {
+                var selected = s.slot === currentSlotKey ? ' selected' : '';
+                return `<option value="${s.slot}"${selected}>${s.slot} — ${s.faculty}</option>`;
+            })
+            .join('');
+        slotCellHtml = `<select class="form-select form-select-sm slot-swap-select" data-course-id="${courseData.courseId}">${optionsHtml}</select>`;
+    } else {
+        slotCellHtml = courseData.slots.join('+');
+    }
+
+    // ── Visibility icon ──────────────────────────────────────────────────────
+    var isHidden = courseData.isHidden === true;
+    var eyeIconClass = isHidden ? 'fa-eye-slash' : 'fa-eye';
+    var rowOpacity = isHidden ? 'opacity: 0.5;' : '';
+    var dataHidden = isHidden ? 'true' : 'false';
+
     var $courseListItem = $(
         `<tr
             data-course="course${courseData.courseId}"
             data-is-project="${courseData.isProject}"
+            data-hidden="${dataHidden}"
+            style="${rowOpacity}"
         >
-            <td>${courseData.slots.join('+')}</td>
+            <td>${slotCellHtml}</td>
             <td>${courseData.courseCode}</td>
             <td>${courseData.courseTitle}</td>
             <td>${courseData.faculty}</td>
             <td>${courseData.venue}</td>
             <td>${courseData.credits}</td>
+            <td class="text-center"><i class="fas ${eyeIconClass} course-visibility-toggle" style="cursor:pointer;" title="Toggle visibility"></i></td>
             <td><i class="fas fa-times close"></i></td>
         </tr>`,
     );
@@ -210,7 +351,7 @@ window.addCourseToCourseList = (courseData) => {
 };
 
 /*
-    Function to remove a course
+    Function to remove a course from the course list
  */
 function removeCourseFromCourseList(course) {
     $(`#course-list tbody tr[data-course="${course}"]`).remove();
