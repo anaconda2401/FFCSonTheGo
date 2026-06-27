@@ -33,3 +33,10 @@
 #course-list table tbody tr {
     cursor: pointer;
 }
+
+/* Quick Swap dropdown — wide enough to show full Faculty names */
+#course-list .slot-swap-select {
+    min-width: 280px;
+    max-width: 420px;
+    width: auto;
+}

@@ -7,6 +7,11 @@
 // Structure: { 'FACULTY NAME': { theory: [{slot, venue, faculty, type}...], lab: [...] } }
 var currentParsedData = {};
 
+// Flat, unfiltered list of every row from the last TSV paste.
+// Structure: [ { slot, venue, faculty, type }, ... ]
+// Never trimmed by faculty selection — used to power the full Quick Swap dropdown.
+var allPastedSlots = [];
+
 import 'easy-autocomplete/dist/easy-autocomplete.min.css';
 import 'bootstrap-select/dist/css/bootstrap-select.min.css';
 
@@ -217,6 +222,12 @@ $(() => {
                     isProject: isProject,
                     isHidden: false,
                     availableTheorySlots: facultyData.theory.slice(),
+                    // Snapshot of the full parsed TSV so Quick Swap can offer all faculties
+                    fullParsedSource: JSON.parse(
+                        JSON.stringify(currentParsedData),
+                    ),
+                    // Flat, unfiltered copy of every pasted row — powers the Quick Swap dropdown
+                    unfilteredSlots: allPastedSlots.slice(),
                 };
                 activeTable.data.push(tCourseData);
                 addCourseToCourseList(tCourseData);
@@ -240,6 +251,12 @@ $(() => {
                     isProject: isProject,
                     isHidden: false,
                     availableLabSlots: facultyData.lab.slice(),
+                    // Snapshot of the full parsed TSV so Quick Swap can offer all faculties
+                    fullParsedSource: JSON.parse(
+                        JSON.stringify(currentParsedData),
+                    ),
+                    // Flat, unfiltered copy of every pasted row — powers the Quick Swap dropdown
+                    unfilteredSlots: allPastedSlots.slice(),
                 };
                 activeTable.data.push(lCourseData);
                 addCourseToCourseList(lCourseData);
@@ -314,8 +331,9 @@ $(() => {
     $('#raw-slot-data').on('input', function () {
         var rawData = $(this).val().trim();
 
-        // Reset module-level parsed data map
+        // Reset module-level parsed data map and flat stash
         currentParsedData = {};
+        allPastedSlots = [];
 
         // Reset all three dropdowns
         $('#faculty-select')
@@ -367,6 +385,9 @@ $(() => {
                     faculty: faculty,
                     type: courseType,
                 };
+
+                // Append to the global unfiltered flat stash
+                allPastedSlots.push(entry);
 
                 // ETH = theory, ELA = lab (VIT portal types)
                 var isLab =

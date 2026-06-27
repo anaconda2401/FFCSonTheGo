@@ -108,9 +108,18 @@ $(() => {
         Change event for inline slot-swap dropdowns in the course list
      */
     $('#course-list').on('change', '.slot-swap-select', function () {
-        var newSlot = $(this).val();
+        var rawVal = $(this).val();
         var courseId = Number($(this).data('course-id'));
         var courseKey = 'course' + courseId;
+
+        // Parse the JSON-encoded value: { slot, faculty, venue }
+        var parsed;
+        try {
+            parsed = JSON.parse(rawVal);
+        } catch (e) {
+            return;
+        }
+        if (!parsed || !parsed.slot) return;
 
         // Find the course in state
         var courseObj = null;
@@ -122,35 +131,18 @@ $(() => {
         }
         if (!courseObj) return;
 
-        // Resolve the available slots array: typed arrays take priority over legacy flat array
-        var availPool =
-            courseObj.availableTheorySlots ||
-            courseObj.availableLabSlots ||
-            courseObj.availableSlots ||
-            [];
-
-        // Find the matching slot entry
-        var newEntry = null;
-        for (var j = 0; j < availPool.length; ++j) {
-            if (availPool[j].slot === newSlot) {
-                newEntry = availPool[j];
-                break;
-            }
-        }
-        if (!newEntry) return;
-
         // Build new slots array (supports compound slots like A1+TA1 or L49+L50)
-        var newSlots = newSlot.split(/\s*\+\s*/).filter(Boolean);
+        var newSlots = parsed.slot.split(/\s*\+\s*/).filter(Boolean);
 
         // Update the state object
         courseObj.slots = newSlots;
-        courseObj.faculty = newEntry.faculty;
-        courseObj.venue = newEntry.venue;
+        courseObj.faculty = parsed.faculty;
+        courseObj.venue = parsed.venue;
 
         // Update Faculty and Venue cells in the table row
         var $row = $(this).closest('tr');
-        $row.find('td').eq(getColumnIndex('Faculty')).text(newEntry.faculty);
-        $row.find('td').eq(getColumnIndex('Venue')).text(newEntry.venue);
+        $row.find('td').eq(getColumnIndex('Faculty')).text(parsed.faculty);
+        $row.find('td').eq(getColumnIndex('Venue')).text(parsed.venue);
 
         // Re-render timetable for this course (skip if hidden)
         if (!courseObj.isHidden) {
@@ -169,9 +161,17 @@ $(() => {
             .eq(getColumnIndex('Slot'));
         // If the cell contains a swap dropdown, read the current value; otherwise use text
         var $slotSelect = $slotCell.find('.slot-swap-select');
-        var slotString = $slotSelect.length
-            ? $slotSelect.val()
-            : $slotCell.text();
+        var slotString;
+        if ($slotSelect.length) {
+            try {
+                var parsed = JSON.parse($slotSelect.val());
+                slotString = parsed.slot || $slotSelect.val();
+            } catch (e) {
+                slotString = $slotSelect.val();
+            }
+        } else {
+            slotString = $slotCell.text();
+        }
         var courseCode = $(this)
             .find('td')
             .eq(getColumnIndex('Course Code'))
@@ -264,26 +264,168 @@ function updateCredits() {
  */
 window.addCourseToCourseList = (courseData) => {
     // ── Build Slot cell ──────────────────────────────────────────────────────
-    // Use typed available-slots arrays (new) or legacy flat array (old saves).
-    // Theory rows use availableTheorySlots; lab rows use availableLabSlots.
-    var availPool =
-        courseData.availableTheorySlots ||
-        courseData.availableLabSlots ||
-        courseData.availableSlots ||
-        [];
+    // Determine row type by the first slot character.
+    // Lab slots start with 'L'; theory slots do not.
+    var isLabRow =
+        courseData.slots &&
+        courseData.slots.length > 0 &&
+        courseData.slots[0].toUpperCase().charAt(0) === 'L';
+
     var slotCellHtml;
 
-    if (availPool.length > 0) {
+    // ── Priority 1: unfilteredSlots (flat array, all faculties, type-filtered) ──
+    // This is the preferred path for courses added via "Paste from Portal".
+    // Filter strictly by the `type` field: ETH for theory rows, ELA for lab rows.
+    if (courseData.unfilteredSlots && courseData.unfilteredSlots.length > 0) {
+        var typeFilter = isLabRow ? 'ELA' : 'ETH';
+        var poolFromUnfiltered = courseData.unfilteredSlots.filter(function (
+            s,
+        ) {
+            return s.type && s.type.toUpperCase() === typeFilter;
+        });
+
+        // If the type field isn't populated, fall back to slot-name heuristic
+        if (poolFromUnfiltered.length === 0) {
+            poolFromUnfiltered = courseData.unfilteredSlots.filter(function (
+                s,
+            ) {
+                var startsWithL =
+                    s.slot && s.slot.toUpperCase().charAt(0) === 'L';
+                return isLabRow ? startsWithL : !startsWithL;
+            });
+        }
+
+        if (poolFromUnfiltered.length > 0) {
+            var currentSlotKey = courseData.slots.join('+');
+            var optionsHtml = poolFromUnfiltered
+                .map(function (s) {
+                    var selected = s.slot === currentSlotKey ? ' selected' : '';
+                    var label =
+                        s.slot +
+                        ' \u2014 ' +
+                        s.faculty +
+                        (s.venue ? ' (' + s.venue + ')' : '');
+                    var val = JSON.stringify({
+                        slot: s.slot,
+                        faculty: s.faculty,
+                        venue: s.venue || '',
+                    });
+                    return (
+                        "<option value='" +
+                        val.replace(/'/g, '&apos;') +
+                        "'" +
+                        selected +
+                        '>' +
+                        label +
+                        '</option>'
+                    );
+                })
+                .join('');
+            slotCellHtml =
+                '<select class="form-select form-select-sm slot-swap-select" ' +
+                'data-course-id="' +
+                courseData.courseId +
+                '">' +
+                optionsHtml +
+                '</select>';
+        } else {
+            slotCellHtml = courseData.slots.join('+');
+        }
+
+        // ── Priority 2: fullParsedSource (faculty-grouped object, all faculties) ──
+        // Fallback for saves that have fullParsedSource but not unfilteredSlots.
+    } else if (
+        courseData.fullParsedSource &&
+        Object.keys(courseData.fullParsedSource).length > 0
+    ) {
+        var allOptions = [];
         var currentSlotKey = courseData.slots.join('+');
-        var optionsHtml = availPool
-            .map(function (s) {
-                var selected = s.slot === currentSlotKey ? ' selected' : '';
-                return `<option value="${s.slot}"${selected}>${s.slot} — ${s.faculty}</option>`;
-            })
-            .join('');
-        slotCellHtml = `<select class="form-select form-select-sm slot-swap-select" data-course-id="${courseData.courseId}">${optionsHtml}</select>`;
+        Object.keys(courseData.fullParsedSource).forEach(function (
+            facultyName,
+        ) {
+            var bucket = courseData.fullParsedSource[facultyName];
+            var entries = isLabRow ? bucket.lab : bucket.theory;
+            (entries || []).forEach(function (entry) {
+                allOptions.push(entry);
+            });
+        });
+
+        if (allOptions.length > 0) {
+            var optionsHtml = allOptions
+                .map(function (s) {
+                    var selected = s.slot === currentSlotKey ? ' selected' : '';
+                    var label =
+                        s.slot +
+                        ' \u2014 ' +
+                        s.faculty +
+                        (s.venue ? ' (' + s.venue + ')' : '');
+                    var val = JSON.stringify({
+                        slot: s.slot,
+                        faculty: s.faculty,
+                        venue: s.venue || '',
+                    });
+                    return (
+                        "<option value='" +
+                        val.replace(/'/g, '&apos;') +
+                        "'" +
+                        selected +
+                        '>' +
+                        label +
+                        '</option>'
+                    );
+                })
+                .join('');
+            slotCellHtml =
+                '<select class="form-select form-select-sm slot-swap-select" ' +
+                'data-course-id="' +
+                courseData.courseId +
+                '">' +
+                optionsHtml +
+                '</select>';
+        } else {
+            slotCellHtml = courseData.slots.join('+');
+        }
     } else {
-        slotCellHtml = courseData.slots.join('+');
+        // ── Priority 3: Legacy per-type available slots arrays ────────────────
+        // Backwards compatibility with saves pre-dating the fullParsedSource field.
+        var availPool =
+            courseData.availableTheorySlots ||
+            courseData.availableLabSlots ||
+            courseData.availableSlots ||
+            [];
+
+        if (availPool.length > 0) {
+            var currentSlotKey = courseData.slots.join('+');
+            var optionsHtml = availPool
+                .map(function (s) {
+                    var selected = s.slot === currentSlotKey ? ' selected' : '';
+                    var val = JSON.stringify({
+                        slot: s.slot,
+                        faculty: s.faculty || '',
+                        venue: s.venue || '',
+                    });
+                    var label = s.slot + ' \u2014 ' + (s.faculty || '');
+                    return (
+                        "<option value='" +
+                        val.replace(/'/g, '&apos;') +
+                        "'" +
+                        selected +
+                        '>' +
+                        label +
+                        '</option>'
+                    );
+                })
+                .join('');
+            slotCellHtml =
+                '<select class="form-select form-select-sm slot-swap-select" ' +
+                'data-course-id="' +
+                courseData.courseId +
+                '">' +
+                optionsHtml +
+                '</select>';
+        } else {
+            slotCellHtml = courseData.slots.join('+');
+        }
     }
 
     // ── Visibility icon ──────────────────────────────────────────────────────
